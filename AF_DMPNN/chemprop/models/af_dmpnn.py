@@ -10,22 +10,16 @@ import numpy as np
 
 class CrossScaleAttention(nn.Module):
     """
-    跨尺度注意力桥接模块
-    连接原子级和碎片级表征
     """
 
     def __init__(self, hidden_dim, temperature=0.1):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.temperature = temperature
-        # 查询、键、值的投影
         self.query_proj = nn.Linear(hidden_dim, hidden_dim)
         self.key_proj = nn.Linear(hidden_dim, hidden_dim)
         self.value_proj = nn.Linear(hidden_dim, hidden_dim)
-
-        # 跨尺度门控机制
         self.scale_gate = nn.Linear(hidden_dim * 2, 1)
-        # 非线性变换
         self.nonlinear = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.ReLU(),
@@ -34,7 +28,6 @@ class CrossScaleAttention(nn.Module):
 
     def forward(self, molecular_context, atom_repr, fragment_repr):
         """
-        参数:
             molecular_context: [batch_size, hidden_dim]
             atom_repr: [batch_size, num_atoms, hidden_dim]
             fragment_repr: [batch_size, num_fragments, hidden_dim]
@@ -46,39 +39,25 @@ class CrossScaleAttention(nn.Module):
             molecular_context.unsqueeze(1).expand(-1, num_fragments, -1),
             fragment_repr
         ], dim=-1)
-
-        # 非线性变换得到碎片权重
         frag_importance = torch.sigmoid(
             self.nonlinear(contextual_features).mean(dim=-1)
         )  # [batch_size, num_fragments]
         frag_importance = F.softmax(frag_importance, dim=-1)
-        # 投影
         query = self.query_proj(atom_repr)  # [batch_size, num_atoms, hidden_dim]
         key = self.key_proj(fragment_repr)  # [batch_size, num_fragments, hidden_dim]
         value = self.value_proj(fragment_repr)  # [batch_size, num_fragments, hidden_dim]
-
-        # 计算注意力分数
         attention_scores = torch.bmm(query,
                                      key.transpose(1, 2)) / self.temperature  # [batch_size, num_atoms, num_fragments]
         print(frag_importance.tolist())
-        # 应用碎片权重
         expanded_importance = frag_importance.unsqueeze(1).expand(-1, num_atoms,
                                                                   -1)  # [batch_size, num_atoms, num_fragments]
         weighted_scores = attention_scores + torch.log(expanded_importance + 1e-8)
-
-        # softmax归一化
         attention_weights = F.softmax(weighted_scores, dim=-1)
         print(torch.mean(attention_weights.squeeze(), dim=0).tolist())
-
-        # 应用注意力权重到值上
         attended_value = torch.bmm(attention_weights, value)  # [batch_size, num_atoms, hidden_dim]
-
-        # 门控融合
         concatenated = torch.cat([atom_repr, attended_value], dim=-1)
         gate_values = torch.sigmoid(self.scale_gate(concatenated))
-        # 残差连接
         fused_repr = gate_values * atom_repr + (1 - gate_values) * attended_value
-
         return fused_repr
 
 
@@ -137,13 +116,11 @@ class DMPNN(nn.Module):
             frags_b_message = self.act_func(frags_input)  # num_bonds x hidden_size
         # Message passing
         for depth in range(self.depth - 1):
-            # 获取碎片信息
             with torch.no_grad():
                 frags_b_message = self.message_aggregation(frags_input, frags_b_message, frags_a2b, frags_b2a,
                                                            frags_b2revb)
                 frags_feature, _ = self.molReadout(f_frags_atoms, frags_b_message, frags_a2b, frags_a_scope,
                                                    padding=True)
-            # 碎片->原子信息交互残差连接
             frags_a_message = frags_feature[a2frag]
             frags_a_message_expend = frags_a_message[b2a]
             combined_message = torch.cat([message, frags_a_message_expend], dim=1)
@@ -189,16 +166,13 @@ class DMPNN(nn.Module):
 
 class af_DMPNN(nn.Module):
     """
-    完整的增强版DMPNN：层级融合 + 自适应重要性评估
     """
 
     def __init__(self, args: TrainArgs):
         super().__init__()
         self.hidden_size = args.hidden_size
         self.dropout_rate = args.dropout
-        # 原子级DMPNN编码器 (原有主干)
         self.atom_dmpnn = DMPNN(args)
-        # 跨尺度注意力桥接
         self.cross_scale_attention = CrossScaleAttention(self.hidden_size)
         self.cached_zero_vector = nn.Parameter(torch.zeros(self.hidden_size), requires_grad=False)
         self.use_input_features = args.use_input_features
@@ -207,20 +181,15 @@ class af_DMPNN(nn.Module):
 
     def forward(self, batch: BatchMolGraph, features_batch: List[np.ndarray] = None):
         """
-        参数:
-            batch: 分子图批次数据
         """
-        # # 通过DMPNN获取原子级表征
         molecular_global, atom_repr, f_frag, mol2Frags = self.atom_dmpnn(batch)
         fragment_repr = index_select_ND(f_frag, mol2Frags)
         fragment_repr = fragment_repr[1:, :]
-        # === 跨尺度融合 ===
         mol2a = batch.get_mol2a()
         mols_atoms = index_select_ND(atom_repr, mol2a)
         mols_atoms = mols_atoms[1:, :]
         fused_atom_repr = self.cross_scale_attention(molecular_global, mols_atoms, fragment_repr)
         molPerfrags = (mol2Frags > 0).float().sum(dim=1).unsqueeze(-1)[1:, :]
-        # === 分层读取 ===
         mean_pool = fused_atom_repr.sum(dim=1)
         max_pool = fused_atom_repr.max(dim=1)[0]
         mean_fragment = torch.sum(fragment_repr, dim=1) / molPerfrags
