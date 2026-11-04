@@ -90,7 +90,6 @@ def atom_features(atom: Chem.rdchem.Atom, functional_groups: List[int] = None) -
 
 
 def calculate_fraction_csp3(mol):
-    """手动计算 sp3 杂化碳原子的比例"""
     carbon_atoms = [atom for atom in mol.GetAtoms() if atom.GetAtomicNum() == 6]
     if not carbon_atoms:
         return 0.0
