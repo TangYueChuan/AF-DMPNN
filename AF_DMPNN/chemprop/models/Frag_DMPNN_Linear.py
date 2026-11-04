@@ -63,13 +63,11 @@ class DMPNN(nn.Module):
             frags_b_message = self.act_func(frags_input)  # num_bonds x hidden_size
         # Message passing
         for depth in range(self.depth - 1):
-            # 获取碎片信息
             with torch.no_grad():
                 frags_b_message = self.message_aggregation(frags_input, frags_b_message, frags_a2b, frags_b2a,
                                                            frags_b2revb)
                 frags_feature, _ = self.molReadout(f_frags_atoms, frags_b_message, frags_a2b, frags_a_scope,
                                                    padding=True)
-            # 碎片->原子信息交互残差连接
             frags_a_message = frags_feature[a2frag]
             frags_a_message_expend = frags_a_message[b2a]
             combined_message = torch.cat([message, frags_a_message_expend], dim=1)
@@ -116,14 +114,12 @@ class DMPNN(nn.Module):
 
 class af_DMPNN(nn.Module):
     """
-    完整的增强版DMPNN：层级融合 + 自适应重要性评估
     """
 
     def __init__(self, args: TrainArgs):
         super().__init__()
         self.hidden_size = args.hidden_size
         self.dropout_rate = args.dropout
-        # 原子级DMPNN编码器 (原有主干)
         self.atom_dmpnn = DMPNN(args)
         self.cached_zero_vector = nn.Parameter(torch.zeros(self.hidden_size), requires_grad=False)
         self.use_input_features = args.use_input_features
@@ -131,10 +127,5 @@ class af_DMPNN(nn.Module):
         self.fragment_type = args.fragment_type
 
     def forward(self, batch: BatchMolGraph, features_batch: List[np.ndarray] = None):
-        """
-        参数:
-            batch: 分子图批次数据
-        """
-        # # 通过DMPNN获取原子级表征
         molecular_global, atom_repr, f_frag, mol2Frags = self.atom_dmpnn(batch)
         return molecular_global
